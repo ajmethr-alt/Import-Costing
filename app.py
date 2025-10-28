@@ -1,11 +1,10 @@
-# app.py - Final: session save/load, branding, container unloading, clearing allocation,
-# per-unit charges on rows, weightage ratios, improved UI + export
+# app_patched.py - Patched version with safe rerun handling
+# (Replace your app.py with this file if you want the patched version)
 import streamlit as st
 import pandas as pd
 import numpy as np
 from io import BytesIO
 import json
-import base64
 from datetime import datetime
 
 st.set_page_config(layout="wide", page_title="Import Cost Calculator (JAT)", page_icon="🧾")
@@ -26,8 +25,7 @@ DEFAULT_WB = "Tariff_and_Costing.xlsx"
 def load_tariff(path_or_file):
     try:
         df = pd.read_excel(path_or_file, sheet_name="TariffTable")
-    except Exception as e:
-        # return empty with expected columns
+    except Exception:
         cols = ['Product Type','HS Code','Duty %','PAL %','CESS %','Excise %','SSCL %','VAT %']
         return pd.DataFrame(columns=cols)
     df.columns = [str(c).strip() for c in df.columns]
@@ -60,7 +58,6 @@ def json_download_button(data, filename):
     st.download_button("Save session (download JSON)", data=b, file_name=filename, mime="application/json")
 
 def excel_download_bytes(sheets_dict):
-    # sheets_dict: name -> dataframe
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for name, df in sheets_dict.items():
@@ -93,17 +90,19 @@ if "allocated" not in st.session_state:
 if "last_saved" not in st.session_state:
     st.session_state.last_saved = None
 
+# initialize rerun flag
+if "_do_rerun" not in st.session_state:
+    st.session_state["_do_rerun"] = False
+
 # ----------------- Top help / How to use -----------------
 with st.expander("How to use (quick) — recommended workflow", expanded=False):
-    st.markdown("""
-1. Enter product lines (add rows on left). Use the Product Type dropdown so tariffs are auto-applied.  
+    st.markdown("""1. Enter product lines (add rows on left). Use the Product Type dropdown so tariffs are auto-applied.  
 2. Enter Qty and Unit ExWorks (foreign currency).  
 3. In sidebar, set containers, freight per container, unloading per container (foreign) and total clearing (LKR).  
 4. Click **Allocate freight & clearing & unloading** to auto-distribute those consignment costs by exworks-weighted ratio.  
 5. Optionally override freight per row checkbox+value.  
 6. Click **Compute landed costs for rows** to calculate CIF, taxes, totals.  
-7. Download CSV/Excel or Save session.  
-""")
+7. Download CSV/Excel or Save session.""")
 
 # ----------------- Sidebar: Controls & global inputs -----------------
 st.sidebar.header("Table controls")
@@ -111,16 +110,29 @@ add_n = st.sidebar.number_input("Add N blank rows", min_value=1, max_value=200, 
 if st.sidebar.button("Add blank rows"):
     for _ in range(add_n):
         st.session_state.products.append(default_row())
-    st.experimental_rerun()
+    # safe rerun
+    try:
+        st.experimental_rerun()
+    except Exception:
+        st.session_state["_do_rerun"] = True
+        st.stop()
 
 if st.sidebar.button("Clear all rows"):
     st.session_state.products = [default_row()]
     st.session_state.allocated = False
-    st.experimental_rerun()
+    try:
+        st.experimental_rerun()
+    except Exception:
+        st.session_state["_do_rerun"] = True
+        st.stop()
 
 if st.sidebar.button("Duplicate last row"):
     st.session_state.products.append(st.session_state.products[-1].copy())
-    st.experimental_rerun()
+    try:
+        st.experimental_rerun()
+    except Exception:
+        st.session_state["_do_rerun"] = True
+        st.stop()
 
 # shipment & allocation parameters
 st.sidebar.header("Shipment & allocation (global)")
@@ -144,11 +156,14 @@ st.sidebar.header("Session")
 if st.sidebar.button("Restore last session in this browser"):
     if st.session_state.last_saved:
         st.session_state.products = st.session_state.last_saved.copy()
-        st.sidebar.success("Restored last in-browser session.")
+        try:
+            st.experimental_rerun()
+        except Exception:
+            st.session_state["_do_rerun"] = True
+            st.stop()
     else:
         st.sidebar.info("No previous session in this browser.")
 if st.sidebar.button("Download current session"):
-    # create JSON of current products and meta
     payload = {"products": st.session_state.products, "meta": {"ts": str(datetime.utcnow()), "fx_rate": fx_rate}}
     json_download_button(payload, f"cost_session_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json")
 
@@ -158,6 +173,11 @@ if uploaded_session:
         d = json.load(uploaded_session)
         if "products" in d:
             st.session_state.products = d["products"]
+            try:
+                st.experimental_rerun()
+            except Exception:
+                st.session_state["_do_rerun"] = True
+                st.stop()
             st.sidebar.success("Session loaded.")
         else:
             st.sidebar.error("Invalid session file.")
@@ -263,15 +283,15 @@ for i, row in enumerate(st.session_state.products):
     contpct = cols2[4].number_input("Contingency %", value=float(row.get("Contingency %",0.03)), key=f"cont_{i}", format="%.4f")
     mrg = cols2[5].number_input("Desired margin", value=float(row.get("Desired Margin",0.20)), key=f"mrg_{i}", format="%.4f")
 
-    # action buttons
+    # action buttons (safe - set rerun flag instead of immediate rerun)
     actc = st.columns([0.5,0.5])[1]
     with actc:
         if st.button("Delete", key=f"del_{i}"):
             st.session_state.products.pop(i)
-            st.experimental_rerun()
+            st.session_state["_do_rerun"] = True
         if st.button("Insert below", key=f"insrow_{i}"):
             st.session_state.products.insert(i+1, default_row())
-            st.experimental_rerun()
+            st.session_state["_do_rerun"] = True
 
     # write back values
     st.session_state.products[i] = {
@@ -293,6 +313,14 @@ for i, row in enumerate(st.session_state.products):
         "Insurance Rate": float(row.get("Insurance Rate", insurance_rate_global))
     }
     st.markdown("---")
+
+# perform deferred rerun if flagged
+if st.session_state.get("_do_rerun", False):
+    st.session_state["_do_rerun"] = False
+    try:
+        st.experimental_rerun()
+    except Exception:
+        st.stop()
 
 # ----------------- Compute rows -----------------
 def compute_rows(df_in, tariff, fx_rate):
@@ -368,7 +396,6 @@ if st.sidebar.button("Compute landed costs for rows"):
     if not st.session_state.allocated:
         st.sidebar.info("Allocating freight / clearing / unloading automatically.")
         # perform allocation same code as allocate button (to avoid duplication, you could refactor)
-        # (copy allocation code here)
         total_freight = total_freight_override if total_freight_override > 0 else (num_containers * freight_per_container)
         total_unloading = total_unloading_override if total_unloading_override > 0 else (num_containers * unloading_per_container)
         exvals = np.array([float(r.get("Qty",0)) * float(r.get("Unit ExWorks",0.0)) for r in st.session_state.products], dtype=float)
@@ -469,4 +496,3 @@ if "results" in st.session_state:
         st.download_button("Download Excel file", data=b, file_name=f"costing_report_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.xlsx")
 
 st.caption("Tip: Save session to continue later. Use the dropdown to avoid typos. If you want per-row clearing overrides, tell me and I'll add it.")
-
