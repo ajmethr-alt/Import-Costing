@@ -347,9 +347,13 @@ def compute_rows(df_in, tariff, fx_rate):
         merged[rate_col] = pd.to_numeric(merged.get(rate_col,0.0), errors='coerce').fillna(0.0)
     # Exworks foreign
     merged["Total ExWorks_foreign"] = merged["Qty"] * merged["Unit ExWorks"]
-    sum_ex = merged["Total ExWorks_foreign"].sum()
-    merged["ExworksWeight"] = merged["Total ExWorks_foreign"] / sum_ex.replace(0, np.nan)
-    merged["ExworksWeight"] = merged["ExworksWeight"].fillna(0.0)
+   sum_ex = merged["Total ExWorks_foreign"].sum()
+# If sum_ex is zero (no exworks values) avoid division by zero — set weight to 0
+if sum_ex == 0 or np.isclose(sum_ex, 0.0):
+    merged["ExworksWeight"] = 0.0
+else:
+    merged["ExworksWeight"] = merged["Total ExWorks_foreign"] / float(sum_ex)
+
     # per-unit local -> totals (LKR)
     merged["Installation_total_LKR"] = merged["Installation_per_unit"] * merged["Qty"]
     merged["Handling_total_LKR"] = merged["Handling_per_unit"] * merged["Qty"]
